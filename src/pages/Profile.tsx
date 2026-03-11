@@ -8,19 +8,49 @@ import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import { User, Mail, Phone, MapPin, Shield } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { supabase } from '@/integrations/supabase/client';
 
 export default function Profile() {
-  const { user, isAuthenticated, updateProfile } = useAuth();
+  const { user, isAuthenticated, loading, updateProfile } = useAuth();
   const [name, setName] = useState(user?.name || '');
   const [email] = useState(user?.email || '');
   const [phone, setPhone] = useState(user?.phone || '');
   const [address, setAddress] = useState(user?.address || '');
+  const [saving, setSaving] = useState(false);
 
+  // Password
+  const [newPassword, setNewPassword] = useState('');
+  const [changingPw, setChangingPw] = useState(false);
+
+  if (loading) return null;
   if (!isAuthenticated || !user) return <Navigate to="/login" />;
 
-  const handleSave = () => {
-    updateProfile({ name, phone, address });
-    toast.success('Profile updated successfully');
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await updateProfile({ name, phone, address });
+      toast.success('Profile updated successfully');
+    } catch {
+      toast.error('Failed to update profile');
+    }
+    setSaving(false);
+  };
+
+  const handleChangePassword = async () => {
+    if (newPassword.length < 6) {
+      toast.error('Password must be at least 6 characters');
+      return;
+    }
+    setChangingPw(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      toast.success('Password updated successfully');
+      setNewPassword('');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update password');
+    }
+    setChangingPw(false);
   };
 
   return (
@@ -31,7 +61,6 @@ export default function Profile() {
           <p className="text-muted-foreground mt-1">Manage your account information</p>
         </motion.div>
 
-        {/* Avatar */}
         <div className="bg-card rounded-xl border border-border p-6 shadow-card flex items-center gap-5">
           <div className="w-20 h-20 rounded-full bg-gradient-hero flex items-center justify-center text-2xl font-bold text-primary-foreground">
             {user.name.charAt(0)}
@@ -43,7 +72,6 @@ export default function Profile() {
           </div>
         </div>
 
-        {/* Form */}
         <div className="bg-card rounded-xl border border-border p-6 shadow-card space-y-5">
           <div>
             <Label className="flex items-center gap-1.5"><User className="w-4 h-4" /> Full Name</Label>
@@ -62,23 +90,20 @@ export default function Profile() {
             <Label className="flex items-center gap-1.5"><MapPin className="w-4 h-4" /> Address</Label>
             <Input value={address} onChange={e => setAddress(e.target.value)} placeholder="Your address" className="mt-1.5" />
           </div>
-          <Button className="bg-gradient-hero text-primary-foreground hover:opacity-90" onClick={handleSave}>
-            Save Changes
+          <Button className="bg-gradient-hero text-primary-foreground hover:opacity-90" onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving...' : 'Save Changes'}
           </Button>
         </div>
 
-        {/* Password */}
         <div className="bg-card rounded-xl border border-border p-6 shadow-card space-y-4">
           <h3 className="font-display font-semibold text-foreground">Change Password</h3>
           <div>
-            <Label>Current Password</Label>
-            <Input type="password" placeholder="••••••••" className="mt-1.5" />
-          </div>
-          <div>
             <Label>New Password</Label>
-            <Input type="password" placeholder="••••••••" className="mt-1.5" />
+            <Input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Min 6 characters" className="mt-1.5" />
           </div>
-          <Button variant="outline" onClick={() => toast.success('Password updated (demo)')}>Update Password</Button>
+          <Button variant="outline" onClick={handleChangePassword} disabled={changingPw}>
+            {changingPw ? 'Updating...' : 'Update Password'}
+          </Button>
         </div>
       </div>
     </DashboardLayout>

@@ -22,21 +22,8 @@ export default function Login() {
       await login(email, password);
       toast.success('Welcome back!');
       navigate('/dashboard');
-    } catch {
-      toast.error('Invalid credentials. Try a demo account below.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const quickLogin = async (email: string) => {
-    setLoading(true);
-    try {
-      await login(email, 'demo123');
-      toast.success('Welcome back!');
-      navigate('/dashboard');
-    } catch {
-      toast.error('Login failed');
+    } catch (err: any) {
+      toast.error(err?.message || 'Invalid credentials');
     } finally {
       setLoading(false);
     }
@@ -44,7 +31,6 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex">
-      {/* Left panel */}
       <div className="hidden lg:flex lg:w-1/2 bg-gradient-hero items-center justify-center p-12">
         <div className="max-w-md text-primary-foreground">
           <Shield className="w-16 h-16 mb-8 opacity-90" />
@@ -53,7 +39,6 @@ export default function Login() {
         </div>
       </div>
 
-      {/* Right panel */}
       <div className="flex-1 flex items-center justify-center p-6 sm:p-12 bg-background">
         <div className="w-full max-w-md">
           <Link to="/" className="flex items-center gap-2 mb-8 lg:hidden">
@@ -64,7 +49,7 @@ export default function Login() {
           </Link>
 
           <h2 className="text-2xl font-display font-bold text-foreground">Sign in to your account</h2>
-          <p className="mt-2 text-sm text-muted-foreground">Enter your credentials or use a demo account</p>
+          <p className="mt-2 text-sm text-muted-foreground">Enter your credentials to continue</p>
 
           <form onSubmit={handleSubmit} className="mt-8 space-y-5">
             <div>
@@ -90,21 +75,6 @@ export default function Login() {
               {loading ? 'Signing in...' : 'Sign In'}
             </Button>
           </form>
-
-          <div className="mt-8">
-            <p className="text-xs text-muted-foreground text-center mb-3">Quick demo login</p>
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                { label: 'Patient', email: 'patient@demo.com' },
-                { label: 'Doctor', email: 'doctor@demo.com' },
-                { label: 'Admin', email: 'admin@demo.com' },
-              ].map(d => (
-                <Button key={d.email} variant="outline" size="sm" onClick={() => quickLogin(d.email)} className="text-xs">
-                  {d.label}
-                </Button>
-              ))}
-            </div>
-          </div>
 
           <p className="mt-8 text-center text-sm text-muted-foreground">
             Don't have an account? <Link to="/signup" className="text-primary font-medium hover:underline">Sign up</Link>
