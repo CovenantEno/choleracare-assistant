@@ -6,7 +6,8 @@ import AdminDashboard from '@/components/dashboards/AdminDashboard';
 import { Navigate } from 'react-router-dom';
 
 export default function Dashboard() {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading } = useAuth();
+  if (loading) return null;
   if (!isAuthenticated || !user) return <Navigate to="/login" />;
 
   return (

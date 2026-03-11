@@ -28,8 +28,8 @@ export default function SignUp() {
       await signup(name, email, password, role);
       toast.success('Account created successfully!');
       navigate('/dashboard');
-    } catch {
-      toast.error('Signup failed');
+    } catch (err: any) {
+      toast.error(err?.message || 'Signup failed');
     } finally {
       setLoading(false);
     }
@@ -85,16 +85,10 @@ export default function SignUp() {
               <Label>I am a</Label>
               <div className="grid grid-cols-3 gap-2 mt-1.5">
                 {roles.map(r => (
-                  <button
-                    key={r.value}
-                    type="button"
-                    onClick={() => setRole(r.value)}
+                  <button key={r.value} type="button" onClick={() => setRole(r.value)}
                     className={`p-3 rounded-lg border text-center transition-all text-sm ${
-                      role === r.value
-                        ? 'border-primary bg-accent text-accent-foreground'
-                        : 'border-border text-muted-foreground hover:border-primary/50'
-                    }`}
-                  >
+                      role === r.value ? 'border-primary bg-accent text-accent-foreground' : 'border-border text-muted-foreground hover:border-primary/50'
+                    }`}>
                     <p className="font-medium">{r.label}</p>
                   </button>
                 ))}

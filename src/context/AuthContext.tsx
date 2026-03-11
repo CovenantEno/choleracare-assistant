@@ -1,4 +1,6 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { supabase } from '@/integrations/supabase/client';
+import type { User as SupabaseUser, Session } from '@supabase/supabase-js';
 
 export type UserRole = 'patient' | 'doctor' | 'admin';
 
@@ -16,81 +18,125 @@ export interface User {
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
+  loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   signup: (name: string, email: string, password: string, role: UserRole) => Promise<void>;
-  logout: () => void;
-  updateProfile: (data: Partial<User>) => void;
+  logout: () => Promise<void>;
+  updateProfile: (data: Partial<User>) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const DEMO_USERS: Record<string, User & { password: string }> = {
-  'patient@demo.com': {
-    id: 'p1', email: 'patient@demo.com', name: 'Sarah Johnson', role: 'patient',
-    phone: '+1 555-0123', address: '123 Health St', createdAt: '2025-01-15', password: 'demo123'
-  },
-  'doctor@demo.com': {
-    id: 'd1', email: 'doctor@demo.com', name: 'Dr. Michael Chen', role: 'doctor',
-    phone: '+1 555-0456', address: 'City Hospital', createdAt: '2024-08-01', password: 'demo123'
-  },
-  'admin@demo.com': {
-    id: 'a1', email: 'admin@demo.com', name: 'Admin User', role: 'admin',
-    phone: '+1 555-0789', address: 'HQ Office', createdAt: '2024-01-01', password: 'demo123'
-  },
-};
+async function fetchUserData(supabaseUser: SupabaseUser): Promise<User> {
+  // Get profile
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('user_id', supabaseUser.id)
+    .single();
+
+  // Get role
+  const { data: roleData } = await supabase
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', supabaseUser.id)
+    .single();
+
+  return {
+    id: supabaseUser.id,
+    email: supabaseUser.email || '',
+    name: profile?.name || supabaseUser.user_metadata?.name || '',
+    role: (roleData?.role as UserRole) || 'patient',
+    avatar: profile?.avatar_url || undefined,
+    phone: profile?.phone || undefined,
+    address: profile?.address || undefined,
+    createdAt: profile?.created_at || supabaseUser.created_at,
+  };
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem('choleraCare_user');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const login = useCallback(async (email: string, _password: string) => {
-    const demo = DEMO_USERS[email];
-    if (demo) {
-      const { password: _, ...userData } = demo;
-      setUser(userData);
-      localStorage.setItem('choleraCare_user', JSON.stringify(userData));
-      return;
-    }
-    const saved = localStorage.getItem('choleraCare_users');
-    const users = saved ? JSON.parse(saved) : {};
-    if (users[email]) {
-      setUser(users[email]);
-      localStorage.setItem('choleraCare_user', JSON.stringify(users[email]));
-      return;
-    }
-    throw new Error('Invalid credentials');
-  }, []);
+  useEffect(() => {
+    // Set up auth listener FIRST
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (session?.user) {
+          // Use setTimeout to avoid potential deadlock with Supabase client
+          setTimeout(async () => {
+            try {
+              const userData = await fetchUserData(session.user);
+              setUser(userData);
+            } catch (e) {
+              console.error('Error fetching user data:', e);
+              setUser(null);
+            }
+            setLoading(false);
+          }, 0);
+        } else {
+          setUser(null);
+          setLoading(false);
+        }
+      }
+    );
 
-  const signup = useCallback(async (name: string, email: string, _password: string, role: UserRole) => {
-    const newUser: User = {
-      id: crypto.randomUUID(), email, name, role, createdAt: new Date().toISOString(),
-    };
-    const saved = localStorage.getItem('choleraCare_users');
-    const users = saved ? JSON.parse(saved) : {};
-    users[email] = newUser;
-    localStorage.setItem('choleraCare_users', JSON.stringify(users));
-    setUser(newUser);
-    localStorage.setItem('choleraCare_user', JSON.stringify(newUser));
-  }, []);
-
-  const logout = useCallback(() => {
-    setUser(null);
-    localStorage.removeItem('choleraCare_user');
-  }, []);
-
-  const updateProfile = useCallback((data: Partial<User>) => {
-    setUser(prev => {
-      if (!prev) return prev;
-      const updated = { ...prev, ...data };
-      localStorage.setItem('choleraCare_user', JSON.stringify(updated));
-      return updated;
+    // Then get initial session
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      if (session?.user) {
+        try {
+          const userData = await fetchUserData(session.user);
+          setUser(userData);
+        } catch (e) {
+          console.error('Error fetching user data:', e);
+        }
+      }
+      setLoading(false);
     });
+
+    return () => subscription.unsubscribe();
   }, []);
+
+  const login = useCallback(async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+  }, []);
+
+  const signup = useCallback(async (name: string, email: string, password: string, role: UserRole) => {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name } },
+    });
+    if (error) throw error;
+
+    // Insert role
+    if (data.user) {
+      await supabase.from('user_roles').insert({ user_id: data.user.id, role });
+      // Update profile name (trigger creates it with empty name)
+      await supabase.from('profiles').update({ name }).eq('user_id', data.user.id);
+    }
+  }, []);
+
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+  }, []);
+
+  const updateProfile = useCallback(async (data: Partial<User>) => {
+    if (!user) return;
+    const updates: Record<string, unknown> = {};
+    if (data.name !== undefined) updates.name = data.name;
+    if (data.phone !== undefined) updates.phone = data.phone;
+    if (data.address !== undefined) updates.address = data.address;
+    if (data.avatar !== undefined) updates.avatar_url = data.avatar;
+
+    await supabase.from('profiles').update(updates).eq('user_id', user.id);
+    setUser(prev => prev ? { ...prev, ...data } : prev);
+  }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated: !!user, login, signup, logout, updateProfile }}>
+    <AuthContext.Provider value={{ user, isAuthenticated: !!user, loading, login, signup, logout, updateProfile }}>
       {children}
     </AuthContext.Provider>
   );
