@@ -105,7 +105,7 @@ export default function Consultation() {
     // AI NLP analysis of free text
     let aiResult = null;
     try {
-      aiResult = await analyzeSymptoms(freeText, finalAnswers);
+      aiResult = await analyzeSymptoms(freeText, finalAnswers as Record<string, unknown>);
       setAiAnalysis(aiResult);
     } catch (e) {
       console.error('AI analysis error:', e);
