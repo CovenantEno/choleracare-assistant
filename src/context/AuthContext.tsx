@@ -35,94 +35,43 @@ function isUserRole(value: unknown): value is UserRole {
   return value === 'patient' || value === 'doctor' || value === 'admin';
 }
 
-function getRequestedRole(supabaseUser: SupabaseUser): UserRole {
-  const requestedRole = supabaseUser.user_metadata?.requested_role;
-  return isUserRole(requestedRole) ? requestedRole : 'patient';
-}
-
-function buildFallbackUser(supabaseUser: SupabaseUser): User {
-  return {
-    id: supabaseUser.id,
-    email: supabaseUser.email || '',
-    name: supabaseUser.user_metadata?.name || '',
-    role: getRequestedRole(supabaseUser),
-    avatar: undefined,
-    phone: undefined,
-    address: undefined,
-    createdAt: supabaseUser.created_at,
-  };
-}
-
-function getHighestPriorityRole(rows: Array<{ role: UserRole }> | null): UserRole | null {
-  if (!rows || rows.length === 0) return null;
-  const roles = rows.map((row) => row.role);
-  if (roles.includes('admin')) return 'admin';
-  if (roles.includes('doctor')) return 'doctor';
-  if (roles.includes('patient')) return 'patient';
-  return null;
-}
-
 async function fetchUserData(supabaseUser: SupabaseUser): Promise<User> {
-  const fallbackUser = buildFallbackUser(supabaseUser);
+  const fallbackName = supabaseUser.user_metadata?.name || '';
+  const fallbackRole: UserRole = isUserRole(supabaseUser.user_metadata?.requested_role)
+    ? supabaseUser.user_metadata.requested_role
+    : 'patient';
 
-  const [{ data: profile, error: profileError }, { data: roleRows, error: roleError }] = await Promise.all([
-    supabase
-      .from('profiles')
-      .select('*')
-      .eq('user_id', supabaseUser.id)
-      .maybeSingle(),
-    supabase
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', supabaseUser.id),
-  ]);
+  // Fetch profile (use maybeSingle to avoid 406 on missing rows)
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('user_id', supabaseUser.id)
+    .maybeSingle();
 
-  if (profileError && profileError.code !== 'PGRST116') {
-    throw profileError;
-  }
+  // Fetch role (use regular select, returns array)
+  const { data: roleRows } = await supabase
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', supabaseUser.id);
 
-  if (roleError) {
-    throw roleError;
-  }
-
-  let resolvedProfile = profile;
-
-  if (!resolvedProfile) {
-    const { data: createdProfile, error: upsertProfileError } = await supabase
-      .from('profiles')
-      .upsert({ user_id: supabaseUser.id, name: fallbackUser.name }, { onConflict: 'user_id' })
-      .select('*')
-      .maybeSingle();
-
-    if (!upsertProfileError && createdProfile) {
-      resolvedProfile = createdProfile;
+  // Determine role from DB rows
+  let resolvedRole: UserRole = fallbackRole;
+  if (roleRows && roleRows.length > 0) {
+    const dbRole = roleRows[0].role;
+    if (isUserRole(dbRole)) {
+      resolvedRole = dbRole;
     }
-  }
-
-  let resolvedRole = getHighestPriorityRole((roleRows as Array<{ role: UserRole }> | null) ?? null);
-
-  if (!resolvedRole) {
-    const preferredRole = getRequestedRole(supabaseUser);
-    const { error: insertRoleError } = await supabase
-      .from('user_roles')
-      .insert({ user_id: supabaseUser.id, role: preferredRole });
-
-    if (insertRoleError && insertRoleError.code !== '23505') {
-      console.error('Error creating default role:', insertRoleError);
-    }
-
-    resolvedRole = preferredRole;
   }
 
   return {
     id: supabaseUser.id,
     email: supabaseUser.email || '',
-    name: resolvedProfile?.name || fallbackUser.name,
+    name: profile?.name || fallbackName,
     role: resolvedRole,
-    avatar: resolvedProfile?.avatar_url || undefined,
-    phone: resolvedProfile?.phone || undefined,
-    address: resolvedProfile?.address || undefined,
-    createdAt: resolvedProfile?.created_at || supabaseUser.created_at,
+    avatar: profile?.avatar_url || undefined,
+    phone: profile?.phone || undefined,
+    address: profile?.address || undefined,
+    createdAt: profile?.created_at || supabaseUser.created_at,
   };
 }
 
@@ -132,23 +81,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let mounted = true;
-    let requestCounter = 0;
+    let requestId = 0;
 
     const syncUser = async (supabaseUser: SupabaseUser) => {
-      const currentRequest = ++requestCounter;
-
+      const thisRequest = ++requestId;
       try {
         const userData = await fetchUserData(supabaseUser);
-        if (!mounted || currentRequest !== requestCounter) return;
-        setUser(userData);
+        if (mounted && thisRequest === requestId) {
+          setUser(userData);
+          setLoading(false);
+        }
       } catch (e) {
         console.error('Error fetching user data:', e);
-        if (!mounted || currentRequest !== requestCounter) return;
-
-        const fallback = buildFallbackUser(supabaseUser);
-        setUser((prev) => (prev?.id === supabaseUser.id ? prev : fallback));
-      } finally {
-        if (mounted && currentRequest === requestCounter) {
+        if (mounted && thisRequest === requestId) {
+          // Use fallback user so we don't lose the session
+          setUser({
+            id: supabaseUser.id,
+            email: supabaseUser.email || '',
+            name: supabaseUser.user_metadata?.name || '',
+            role: 'patient',
+            createdAt: supabaseUser.created_at,
+          });
           setLoading(false);
         }
       }
@@ -163,13 +116,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      // Skip re-fetching on token refresh to avoid rate limiting
       if (event === 'TOKEN_REFRESHED') {
-        setLoading(false);
         return;
       }
 
-      setLoading(true);
       void syncUser(session.user);
+    });
+
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!mounted) return;
+      if (session?.user) {
+        void syncUser(session.user);
+      } else {
+        setLoading(false);
+      }
     });
 
     return () => {
@@ -195,19 +157,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     if (error) throw error;
 
+    // If session exists, user was auto-confirmed — insert role & profile
     if (data.user && data.session) {
-      const [roleInsert, profileUpsert] = await Promise.all([
+      await Promise.allSettled([
         supabase.from('user_roles').insert({ user_id: data.user.id, role }),
         supabase.from('profiles').upsert({ user_id: data.user.id, name }, { onConflict: 'user_id' }),
       ]);
-
-      if (roleInsert.error && roleInsert.error.code !== '23505') {
-        throw roleInsert.error;
-      }
-
-      if (profileUpsert.error) {
-        throw profileUpsert.error;
-      }
     }
 
     return { needsEmailConfirmation: !data.session };
