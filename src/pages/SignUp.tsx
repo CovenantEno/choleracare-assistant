@@ -25,9 +25,15 @@ export default function SignUp() {
     }
     setLoading(true);
     try {
-      await signup(name, email, password, role);
-      toast.success('Account created successfully!');
-      navigate('/dashboard');
+      const result = await signup(name, email, password, role);
+
+      if (result.needsEmailConfirmation) {
+        toast.success('Account created! Please verify your email before signing in.');
+        navigate('/login');
+      } else {
+        toast.success('Account created successfully!');
+        navigate('/dashboard');
+      }
     } catch (err: any) {
       toast.error(err?.message || 'Signup failed');
     } finally {

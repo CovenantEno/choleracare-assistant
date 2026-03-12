@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
-import type { User as SupabaseUser, Session } from '@supabase/supabase-js';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 
 export type UserRole = 'patient' | 'doctor' | 'admin';
 
@@ -15,42 +15,114 @@ export interface User {
   createdAt: string;
 }
 
+export interface SignupResult {
+  needsEmailConfirmation: boolean;
+}
+
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  signup: (name: string, email: string, password: string, role: UserRole) => Promise<void>;
+  signup: (name: string, email: string, password: string, role: UserRole) => Promise<SignupResult>;
   logout: () => Promise<void>;
   updateProfile: (data: Partial<User>) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-async function fetchUserData(supabaseUser: SupabaseUser): Promise<User> {
-  // Get profile
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('user_id', supabaseUser.id)
-    .single();
+function isUserRole(value: unknown): value is UserRole {
+  return value === 'patient' || value === 'doctor' || value === 'admin';
+}
 
-  // Get role
-  const { data: roleData } = await supabase
-    .from('user_roles')
-    .select('role')
-    .eq('user_id', supabaseUser.id)
-    .single();
+function getRequestedRole(supabaseUser: SupabaseUser): UserRole {
+  const requestedRole = supabaseUser.user_metadata?.requested_role;
+  return isUserRole(requestedRole) ? requestedRole : 'patient';
+}
+
+function buildFallbackUser(supabaseUser: SupabaseUser): User {
+  return {
+    id: supabaseUser.id,
+    email: supabaseUser.email || '',
+    name: supabaseUser.user_metadata?.name || '',
+    role: getRequestedRole(supabaseUser),
+    avatar: undefined,
+    phone: undefined,
+    address: undefined,
+    createdAt: supabaseUser.created_at,
+  };
+}
+
+function getHighestPriorityRole(rows: Array<{ role: UserRole }> | null): UserRole | null {
+  if (!rows || rows.length === 0) return null;
+  const roles = rows.map((row) => row.role);
+  if (roles.includes('admin')) return 'admin';
+  if (roles.includes('doctor')) return 'doctor';
+  if (roles.includes('patient')) return 'patient';
+  return null;
+}
+
+async function fetchUserData(supabaseUser: SupabaseUser): Promise<User> {
+  const fallbackUser = buildFallbackUser(supabaseUser);
+
+  const [{ data: profile, error: profileError }, { data: roleRows, error: roleError }] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('*')
+      .eq('user_id', supabaseUser.id)
+      .maybeSingle(),
+    supabase
+      .from('user_roles')
+      .select('role')
+      .eq('user_id', supabaseUser.id),
+  ]);
+
+  if (profileError && profileError.code !== 'PGRST116') {
+    throw profileError;
+  }
+
+  if (roleError) {
+    throw roleError;
+  }
+
+  let resolvedProfile = profile;
+
+  if (!resolvedProfile) {
+    const { data: createdProfile, error: upsertProfileError } = await supabase
+      .from('profiles')
+      .upsert({ user_id: supabaseUser.id, name: fallbackUser.name }, { onConflict: 'user_id' })
+      .select('*')
+      .maybeSingle();
+
+    if (!upsertProfileError && createdProfile) {
+      resolvedProfile = createdProfile;
+    }
+  }
+
+  let resolvedRole = getHighestPriorityRole((roleRows as Array<{ role: UserRole }> | null) ?? null);
+
+  if (!resolvedRole) {
+    const preferredRole = getRequestedRole(supabaseUser);
+    const { error: insertRoleError } = await supabase
+      .from('user_roles')
+      .insert({ user_id: supabaseUser.id, role: preferredRole });
+
+    if (insertRoleError && insertRoleError.code !== '23505') {
+      console.error('Error creating default role:', insertRoleError);
+    }
+
+    resolvedRole = preferredRole;
+  }
 
   return {
     id: supabaseUser.id,
     email: supabaseUser.email || '',
-    name: profile?.name || supabaseUser.user_metadata?.name || '',
-    role: (roleData?.role as UserRole) || 'patient',
-    avatar: profile?.avatar_url || undefined,
-    phone: profile?.phone || undefined,
-    address: profile?.address || undefined,
-    createdAt: profile?.created_at || supabaseUser.created_at,
+    name: resolvedProfile?.name || fallbackUser.name,
+    role: resolvedRole,
+    avatar: resolvedProfile?.avatar_url || undefined,
+    phone: resolvedProfile?.phone || undefined,
+    address: resolvedProfile?.address || undefined,
+    createdAt: resolvedProfile?.created_at || supabaseUser.created_at,
   };
 }
 
@@ -59,42 +131,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Set up auth listener FIRST
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (session?.user) {
-          // Use setTimeout to avoid potential deadlock with Supabase client
-          setTimeout(async () => {
-            try {
-              const userData = await fetchUserData(session.user);
-              setUser(userData);
-            } catch (e) {
-              console.error('Error fetching user data:', e);
-              setUser(null);
-            }
-            setLoading(false);
-          }, 0);
-        } else {
-          setUser(null);
+    let mounted = true;
+    let requestCounter = 0;
+
+    const syncUser = async (supabaseUser: SupabaseUser) => {
+      const currentRequest = ++requestCounter;
+
+      try {
+        const userData = await fetchUserData(supabaseUser);
+        if (!mounted || currentRequest !== requestCounter) return;
+        setUser(userData);
+      } catch (e) {
+        console.error('Error fetching user data:', e);
+        if (!mounted || currentRequest !== requestCounter) return;
+
+        const fallback = buildFallbackUser(supabaseUser);
+        setUser((prev) => (prev?.id === supabaseUser.id ? prev : fallback));
+      } finally {
+        if (mounted && currentRequest === requestCounter) {
           setLoading(false);
         }
       }
-    );
+    };
 
-    // Then get initial session
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      if (session?.user) {
-        try {
-          const userData = await fetchUserData(session.user);
-          setUser(userData);
-        } catch (e) {
-          console.error('Error fetching user data:', e);
-        }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+
+      if (!session?.user) {
+        setUser(null);
+        setLoading(false);
+        return;
       }
-      setLoading(false);
+
+      if (event === 'TOKEN_REFRESHED') {
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      void syncUser(session.user);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
@@ -102,20 +183,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (error) throw error;
   }, []);
 
-  const signup = useCallback(async (name: string, email: string, password: string, role: UserRole) => {
+  const signup = useCallback(async (name: string, email: string, password: string, role: UserRole): Promise<SignupResult> => {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { name } },
+      options: {
+        data: { name, requested_role: role },
+        emailRedirectTo: `${window.location.origin}/login`,
+      },
     });
+
     if (error) throw error;
 
-    // Insert role
-    if (data.user) {
-      await supabase.from('user_roles').insert({ user_id: data.user.id, role });
-      // Update profile name (trigger creates it with empty name)
-      await supabase.from('profiles').update({ name }).eq('user_id', data.user.id);
+    if (data.user && data.session) {
+      const [roleInsert, profileUpsert] = await Promise.all([
+        supabase.from('user_roles').insert({ user_id: data.user.id, role }),
+        supabase.from('profiles').upsert({ user_id: data.user.id, name }, { onConflict: 'user_id' }),
+      ]);
+
+      if (roleInsert.error && roleInsert.error.code !== '23505') {
+        throw roleInsert.error;
+      }
+
+      if (profileUpsert.error) {
+        throw profileUpsert.error;
+      }
     }
+
+    return { needsEmailConfirmation: !data.session };
   }, []);
 
   const logout = useCallback(async () => {
