@@ -140,10 +140,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-  }, []);
+const login = useCallback(async (email: string, password: string) => {
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password
+  });
+
+  if (error) throw error;
+
+  if (data.user) {
+    const userData = await fetchUserData(data.user);
+    setUser(userData);
+  }
+}, []);
 
   const signup = useCallback(async (name: string, email: string, password: string, role: UserRole): Promise<SignupResult> => {
     const { data, error } = await supabase.auth.signUp({
