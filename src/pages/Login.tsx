@@ -20,7 +20,6 @@ export default function Login() {
     setLoading(true);
     try {
       await login(email, password);
-      toast.success('Welcome back!');
       navigate('/dashboard');
     } catch (err: any) {
       toast.error(err?.message || 'Invalid credentials');
